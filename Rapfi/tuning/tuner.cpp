@@ -389,10 +389,6 @@ Tuning::TuningConfig validatedCurriculumConfig(const std::vector<Tuning::TuningP
     firstPhase(phases);
     if (config.memoryLimitMB == 0)
         throw std::invalid_argument("tuning curricula require file-backed prepared corpora");
-    if (config.tuneEval && config.usePreviousScalingFactor)
-        throw std::invalid_argument(
-            "tuning curricula require scaling-factor calibration at phase boundaries");
-
     size_t coalescingBoundaries = 0;
     for (size_t i = 0; i < phases.size(); i++) {
         const Tuning::TuningPhase &phase = phases[i];
@@ -438,6 +434,13 @@ Tuning::TuningConfig validatedCurriculumConfig(const std::vector<Tuning::TuningP
         if (!(phase.tuneEval || phase.tuneMoveScore))
             throw std::invalid_argument(
                 "tuning curriculum phases require a value or move_score objective");
+        size_t tunedMoveScoreTables = size_t(config.tuneRule[FREESTYLE])
+                                      + size_t(config.tuneRule[STANDARD])
+                                      + 2 * size_t(config.tuneRule[RENJU]);
+        if (phaseConfig.tuneMoveScore && tunedMoveScoreTables != 1
+            && phaseConfig.trainingSemantics == Tuning::TrainingSemantics::Bootstrap)
+            throw std::invalid_argument(
+                "multi-table policy curriculum phases require current training semantics");
         if (!std::isfinite(phaseConfig.learningRate) || phaseConfig.learningRate <= 0)
             throw std::invalid_argument(
                 "tuning curriculum phase learning rate must be finite and positive");
@@ -621,10 +624,8 @@ Tuner::Tuner(Dataset                                &trainDataset,
     }
 
     trainableParams.assign(tuneParams.size(), uint8_t(1));
-    if (config.tuneMoveScore) {
-        if (moveScoreParamRanges.size() != 1)
-            throw std::logic_error("policy tuning requires exactly one parameter range");
-    }
+    if (config.tuneMoveScore && moveScoreParamRanges.empty())
+        throw std::logic_error("policy tuning requires at least one parameter range");
 }
 
 Tuner::Tuner(std::vector<TuningPhase>                phases,
@@ -1184,7 +1185,7 @@ void Tuner::runImpl(size_t                               epochs,
                               + std::to_string(config.multiPVPolicyTemperature)
                         : std::string())
                 << ".");
-            if (config.tuneEval) {
+            if (config.tuneEval && !config.usePreviousScalingFactor) {
                 MESSAGEL("Recalibrating the current unquantized parameters on the new phase.");
                 K                      = searchOptimalInvScalingFactor(true);
                 recalibratedAtBoundary = true;

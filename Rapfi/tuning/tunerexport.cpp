@@ -190,8 +190,6 @@ namespace Tuning {
 /// saveParams() saves tuneParams back to their associated config value
 void Tuner::saveParams() const
 {
-    if (config.tuneMoveScore && moveScoreParamRanges.size() != 1)
-        throw std::logic_error("policy export has no unique parameter range");
     for (const ParamsSyncRecord &record : syncRecords) {
         assert(tuneParams.size() >= record.baseIndex + record.numElems * record.paramPerElem);
 

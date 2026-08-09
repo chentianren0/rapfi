@@ -162,11 +162,22 @@ void validateConfig(size_t epochs, const TuningConfig &cfg)
         throw std::invalid_argument(
             "multipv-policy-eval-scale requires multipv-policy-temperature greater than 0");
     if (cfg.tuneMoveScore) {
-        if (!cfg.tuneRule[FREESTYLE] || cfg.tuneRule[STANDARD] || cfg.tuneRule[RENJU])
-            throw std::invalid_argument("policy tuning requires the freestyle table only");
-        if (Evaluation::isPolicyCrossActive())
+        size_t tunedTableCount = size_t(cfg.tuneRule[FREESTYLE])
+                                 + size_t(cfg.tuneRule[STANDARD])
+                                 + 2 * size_t(cfg.tuneRule[RENJU]);
+        if (tunedTableCount != 1 && cfg.trainingSemantics == TrainingSemantics::Bootstrap)
             throw std::invalid_argument(
-                "move-score training requires a parent model without compact policy residuals");
+                "multi-table policy tuning requires current training semantics");
+        auto tunesTable = [&](int table) {
+            return table == FREESTYLE && cfg.tuneRule[FREESTYLE]
+                   || table == STANDARD && cfg.tuneRule[STANDARD]
+                   || (table == RENJU || table == RENJU + WHITE) && cfg.tuneRule[RENJU];
+        };
+        for (int table = 0; table < RULE_NB + 1; table++)
+            if (tunesTable(table) && Evaluation::POLICY_CROSS_ACTIVE_MASK[table])
+                throw std::invalid_argument(
+                    "move-score training requires selected tables without compact policy "
+                    "residuals");
     }
     if (!std::isfinite(cfg.moveScoreScale) || cfg.moveScoreScale <= 0)
         throw std::invalid_argument("move-score-scale must be finite and greater than 0");
@@ -182,10 +193,6 @@ void validateConfig(size_t epochs, const TuningConfig &cfg)
     if (cfg.moveScoreReferenceDispersion > 0 && !cfg.projectMoveScoreScale)
         throw std::invalid_argument(
             "move-score-reference-dispersion requires --project-move-score-scale");
-    size_t tunedMoveScoreTables = size_t(cfg.tuneRule[FREESTYLE]) + size_t(cfg.tuneRule[STANDARD])
-                                  + 2 * size_t(cfg.tuneRule[RENJU]);
-    if (cfg.tuneMoveScore && tunedMoveScoreTables != 1)
-        throw std::invalid_argument("policy tuning requires exactly one tuned rule-color table");
     if (cfg.boardSizeMin == 0 || cfg.boardSizeMax > MAX_BOARD_SIZE)
         throw std::invalid_argument("board-size range must be inside the engine board limits");
     if (cfg.boardSizeMin > cfg.boardSizeMax)
