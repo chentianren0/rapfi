@@ -13,7 +13,6 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
-#include <filesystem>
 #include <string>
 
 namespace Tuning {
@@ -43,7 +42,6 @@ private:
     bool                    finished_   = false;
 };
 
-Sha256Digest sha256File(const std::filesystem::path &path);
 std::string  sha256Hex(const Sha256Digest &digest);
 
 }  // namespace Tuning

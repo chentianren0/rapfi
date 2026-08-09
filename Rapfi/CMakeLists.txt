@@ -221,8 +221,13 @@ set(MODULE_SOURCES
     tuning/featureencoder.cpp
     tuning/numpywriter.cpp
     tuning/optimizer.cpp
+    tuning/policytrace.cpp
+    tuning/policytrainer.cpp
+    tuning/tunerobjective.cpp
+    tuning/tunerprepare.cpp
     tuning/tunecorpus.cpp
     tuning/tunedigest.cpp
+    tuning/tunerexport.cpp
     tuning/tuneshard.cpp
     tuning/tunestore.cpp
     tuning/tuner.cpp
@@ -287,9 +292,13 @@ set(HEADERS
     tuning/datawriter.h
     tuning/featureencoder.h
     tuning/optimizer.h
+    tuning/policytrace.h
+    tuning/policytrainer.h
     tuning/tunemap.h
     tuning/tunecorpus.h
     tuning/tuner.h
+    tuning/tunerdetail.h
+    tuning/tunerobjective.h
 
     search/hashtable.h
     search/history.h

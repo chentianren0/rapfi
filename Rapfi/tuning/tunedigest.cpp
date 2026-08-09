@@ -11,7 +11,6 @@
 #include "tunedigest.h"
 
 #include <algorithm>
-#include <fstream>
 #include <limits>
 #include <stdexcept>
 
@@ -128,25 +127,6 @@ Sha256Digest Sha256::finish()
         digest[i * 4 + 3] = static_cast<uint8_t>(state_[i]);
     }
     return digest;
-}
-
-Sha256Digest sha256File(const std::filesystem::path &path)
-{
-    std::ifstream input(path, std::ios::binary);
-    if (!input)
-        throw std::runtime_error("unable to open file for SHA-256: " + path.string());
-
-    Sha256                  hasher;
-    std::array<char, 65536> buffer;
-    while (input) {
-        input.read(buffer.data(), buffer.size());
-        std::streamsize count = input.gcount();
-        if (count > 0)
-            hasher.update(buffer.data(), static_cast<size_t>(count));
-    }
-    if (!input.eof())
-        throw std::runtime_error("failed to read file for SHA-256: " + path.string());
-    return hasher.finish();
 }
 
 std::string sha256Hex(const Sha256Digest &digest)
