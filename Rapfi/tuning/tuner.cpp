@@ -431,16 +431,9 @@ Tuning::TuningConfig validatedCurriculumConfig(const std::vector<Tuning::TuningP
         if (phaseConfig.multiPVPolicyEvalScale > 0 && phaseConfig.multiPVPolicyTemperature == 0)
             throw std::invalid_argument(
                 "tuning curriculum phase MultiPV eval scale requires a positive temperature");
-        if (!(phase.tuneEval || phase.tuneMoveScore))
+        if (!(phase.tuneEval || phase.tuneMoveScore || phase.trainCompactPolicy))
             throw std::invalid_argument(
-                "tuning curriculum phases require a value or move_score objective");
-        size_t tunedMoveScoreTables = size_t(config.tuneRule[FREESTYLE])
-                                      + size_t(config.tuneRule[STANDARD])
-                                      + 2 * size_t(config.tuneRule[RENJU]);
-        if (phaseConfig.tuneMoveScore && tunedMoveScoreTables != 1
-            && phaseConfig.trainingSemantics == Tuning::TrainingSemantics::Bootstrap)
-            throw std::invalid_argument(
-                "multi-table policy curriculum phases require current training semantics");
+                "tuning curriculum phases require an active objective");
         if (!std::isfinite(phaseConfig.learningRate) || phaseConfig.learningRate <= 0)
             throw std::invalid_argument(
                 "tuning curriculum phase learning rate must be finite and positive");
@@ -555,10 +548,10 @@ Tuner::Tuner(Dataset                                &trainDataset,
                  << policyTargetConfig.multiPVTemperature
                  << ", eval scaling factor = " << policyTargetConfig.evalScalingFactor << ".");
     if (config.tuneMoveScore)
-        MESSAGEL("Move-score softmax mode = "
-                 << (config.trainingSemantics == TrainingSemantics::Bootstrap ? "bootstrap"
-                                                                              : "current")
-                 << ", canonical logit scale = " << Evaluation::PolicyBuffer::ScoreScale << ".");
+        MESSAGEL(
+            "Move-score softmax mode = "
+            << (config.trainingSemantics == TrainingSemantics::Bootstrap ? "bootstrap" : "current")
+            << ", canonical logit scale = " << Evaluation::PolicyBuffer::ScoreScale << ".");
     if (config.tuneEval && !config.usePreviousScalingFactor && config.nStepsPerIteration < 1)
         throw std::invalid_argument("scaling-factor calibration requires at least one step");
     if (config.memoryLimitMB != 0) {
@@ -689,77 +682,115 @@ void Tuner::coalesceMoveScoreLayout(AdamOptimizer<TuneParam> &optimizer)
 {
     if (config.trainingSemantics != TrainingSemantics::Bootstrap || !config.tuneMoveScore)
         throw std::logic_error("move-score coalescing requires active bootstrap policy training");
-    if (moveScoreParamRanges.size() != 1 || moveScoreTable < 0)
-        throw std::logic_error("move-score coalescing requires one bootstrap parameter range");
+    if (moveScoreParamRanges.empty() || moveScoreParamRanges.size() != moveScoreTables.size())
+        throw std::logic_error("move-score coalescing requires complete bootstrap table metadata");
     if (!tiedMoveScoreSyncRecords.empty() || !tiedMoveScoreParamIndices.empty())
         throw std::logic_error("move-score parameters are already tied");
 
-    const auto [rangeBegin, rangeEnd] = moveScoreParamRanges.front();
-    MoveScorePair *scores             = Evaluation::P4SCORES[moveScoreTable];
-    const size_t   scoreCount         = arraySize(Evaluation::P4SCORES[moveScoreTable]);
-    if (rangeEnd != tuneParams.size() || rangeEnd - rangeBegin != scoreCount * 2)
-        throw std::logic_error("bootstrap move-score range is not the terminal policy table");
+    const size_t                          prefixEnd = moveScoreParamRanges.front().first;
+    size_t                                oldPolicyParameterCount = 0;
+    size_t                                expectedRangeBegin      = prefixEnd;
+    std::vector<const ParamsSyncRecord *> policyRecords(moveScoreParamRanges.size(), nullptr);
+    for (size_t tableIndex = 0; tableIndex < moveScoreParamRanges.size(); tableIndex++) {
+        const auto [rangeBegin, rangeEnd] = moveScoreParamRanges[tableIndex];
+        const int table                   = moveScoreTables[tableIndex];
+        if (table < 0 || table >= RULE_NB + 1 || rangeBegin != expectedRangeBegin)
+            throw std::logic_error("bootstrap move-score ranges are not a terminal partition");
+        const size_t scoreCount = arraySize(Evaluation::P4SCORES[table]);
+        if (rangeEnd - rangeBegin != scoreCount * 2)
+            throw std::logic_error("bootstrap move-score range has an unexpected size");
+        expectedRangeBegin = rangeEnd;
+        oldPolicyParameterCount += rangeEnd - rangeBegin;
 
-    const ParamsSyncRecord *policyRecord = nullptr;
-    for (const ParamsSyncRecord &record : syncRecords) {
-        const size_t recordEnd = record.baseIndex + record.numElems * record.paramPerElem;
-        if (record.baseIndex == rangeBegin && recordEnd == rangeEnd) {
-            if (policyRecord)
-                throw std::logic_error("move-score coalescing found multiple policy records");
-            policyRecord = &record;
+        for (const ParamsSyncRecord &record : syncRecords) {
+            const size_t recordEnd = record.baseIndex + record.numElems * record.paramPerElem;
+            if (record.baseIndex == rangeBegin && recordEnd == rangeEnd) {
+                if (policyRecords[tableIndex])
+                    throw std::logic_error("move-score coalescing found multiple policy records");
+                policyRecords[tableIndex] = &record;
+            }
+            else if (record.baseIndex < rangeEnd && recordEnd > rangeBegin)
+                throw std::logic_error("move-score parameter range overlaps another sync record");
         }
-        else if (record.baseIndex < rangeEnd && recordEnd > rangeBegin)
-            throw std::logic_error("move-score parameter range overlaps another sync record");
+        const ParamsSyncRecord *record = policyRecords[tableIndex];
+        if (!record || record->address != Evaluation::P4SCORES[table]
+            || record->numElems != scoreCount || record->paramPerElem != 2)
+            throw std::logic_error(
+                "move-score coalescing cannot identify a bootstrap policy record");
     }
-    if (!policyRecord || policyRecord->address != scores || policyRecord->numElems != scoreCount
-        || policyRecord->paramPerElem != 2)
-        throw std::logic_error("move-score coalescing cannot identify the bootstrap policy record");
+    if (expectedRangeBegin != tuneParams.size())
+        throw std::logic_error("bootstrap move-score ranges are not terminal");
 
-    std::vector<TuneParam>           newParams(tuneParams.begin(), tuneParams.begin() + rangeBegin);
-    std::vector<std::vector<size_t>> stateGroups(rangeBegin);
-    for (size_t index = 0; index < rangeBegin; index++)
+    std::vector<TuneParam>           newParams(tuneParams.begin(), tuneParams.begin() + prefixEnd);
+    std::vector<std::vector<size_t>> stateGroups(prefixEnd);
+    for (size_t index = 0; index < prefixEnd; index++)
         stateGroups[index].push_back(index);
 
-    TiedMoveScoreSyncRecord tiedRecord;
-    tiedRecord.layoutTag = "move-score/coalesced-table-" + std::to_string(moveScoreTable);
-    tiedRecord.scores    = scores;
-    tiedRecord.parameterIndices.resize(scoreCount);
-    std::vector<MoveScorePair>                            quantizedScores(scoreCount);
-    std::array<std::unordered_map<Score, ParameterId>, 2> groups;
+    struct CoalescedTable
+    {
+        MoveScorePair             *scores;
+        std::vector<MoveScorePair> quantizedScores;
+    };
+    std::vector<CoalescedTable>            coalescedTables;
+    std::vector<TiedMoveScoreSyncRecord>   newTiedRecords;
+    std::vector<std::pair<size_t, size_t>> newMoveScoreRanges;
+    coalescedTables.reserve(moveScoreParamRanges.size());
+    newTiedRecords.reserve(moveScoreParamRanges.size());
+    newMoveScoreRanges.reserve(moveScoreParamRanges.size());
     constexpr size_t MaxParameterCount = size_t(std::numeric_limits<ParameterId>::max()) + 1;
-    for (size_t side = 0; side < 2; side++) {
-        for (size_t i = 0; i < scoreCount; i++) {
-            const size_t oldIndex    = rangeBegin + i * 2 + side;
-            const Score  score       = decodeMoveScoreParam(tuneParams[oldIndex]);
-            quantizedScores[i][side] = score;
-            auto found               = groups[side].find(score);
-            if (found == groups[side].end()) {
-                if (newParams.size() >= MaxParameterCount)
-                    throw std::length_error(
-                        "coalesced tuning parameter count exceeds ParameterId capacity");
-                const TuneParam encoded = encodeIntegerForTruncatingExport(score,
-                                                                           config.moveScoreScale,
-                                                                           config.moveScoreBias);
-                if (decodeMoveScoreParam(encoded) != score)
-                    throw std::runtime_error(
-                        "coalesced move score is not representable by tuner parameters");
-                const ParameterId newIndex = static_cast<ParameterId>(newParams.size());
-                newParams.push_back(encoded);
-                stateGroups.push_back({oldIndex});
-                found = groups[side].emplace(score, newIndex).first;
+    for (size_t tableIndex = 0; tableIndex < moveScoreParamRanges.size(); tableIndex++) {
+        const auto [rangeBegin, rangeEnd]     = moveScoreParamRanges[tableIndex];
+        const int               table         = moveScoreTables[tableIndex];
+        MoveScorePair          *scores        = Evaluation::P4SCORES[table];
+        const size_t            scoreCount    = arraySize(Evaluation::P4SCORES[table]);
+        const size_t            newRangeBegin = newParams.size();
+        TiedMoveScoreSyncRecord tiedRecord;
+        tiedRecord.layoutTag = "move-score/coalesced-table-" + std::to_string(table);
+        tiedRecord.scores    = scores;
+        tiedRecord.parameterIndices.resize(scoreCount);
+        std::vector<MoveScorePair>                            quantizedScores(scoreCount);
+        std::array<std::unordered_map<Score, ParameterId>, 2> groups;
+        for (size_t side = 0; side < 2; side++) {
+            for (size_t i = 0; i < scoreCount; i++) {
+                const size_t oldIndex    = rangeBegin + i * 2 + side;
+                const Score  score       = decodeMoveScoreParam(tuneParams[oldIndex]);
+                quantizedScores[i][side] = score;
+                auto found               = groups[side].find(score);
+                if (found == groups[side].end()) {
+                    if (newParams.size() >= MaxParameterCount)
+                        throw std::length_error(
+                            "coalesced tuning parameter count exceeds ParameterId capacity");
+                    const TuneParam encoded =
+                        encodeIntegerForTruncatingExport(score,
+                                                         config.moveScoreScale,
+                                                         config.moveScoreBias);
+                    if (decodeMoveScoreParam(encoded) != score)
+                        throw std::runtime_error(
+                            "coalesced move score is not representable by tuner parameters");
+                    const ParameterId newIndex = static_cast<ParameterId>(newParams.size());
+                    newParams.push_back(encoded);
+                    stateGroups.push_back({oldIndex});
+                    found = groups[side].emplace(score, newIndex).first;
+                }
+                else
+                    stateGroups[found->second].push_back(oldIndex);
+                tiedRecord.parameterIndices[i][side] = found->second;
             }
-            else
-                stateGroups[found->second].push_back(oldIndex);
-            tiedRecord.parameterIndices[i][side] = found->second;
         }
+        newMoveScoreRanges.emplace_back(newRangeBegin, newParams.size());
+        newTiedRecords.push_back(std::move(tiedRecord));
+        coalescedTables.push_back({scores, std::move(quantizedScores)});
     }
 
     std::vector<ParamsSyncRecord> newSyncRecords;
-    newSyncRecords.reserve(syncRecords.size() - 1);
+    newSyncRecords.reserve(syncRecords.size() - policyRecords.size());
     std::unordered_map<const void *, ParameterAddress> newParamIndices;
     for (const ParamsSyncRecord &record : syncRecords) {
-        if (&record == policyRecord)
+        if (std::find(policyRecords.begin(), policyRecords.end(), &record) != policyRecords.end())
             continue;
+        const size_t recordEnd = record.baseIndex + record.numElems * record.paramPerElem;
+        if (recordEnd > prefixEnd)
+            throw std::logic_error("non-policy parameter record follows bootstrap policy ranges");
         newSyncRecords.push_back(record);
         for (size_t i = 0; i < record.numElems; i++) {
             const size_t elementBase = record.baseIndex + i * record.paramPerElem;
@@ -772,9 +803,10 @@ void Tuner::coalesceMoveScoreLayout(AdamOptimizer<TuneParam> &optimizer)
         }
     }
     std::unordered_map<const void *, std::array<ParameterId, 2>> newTiedIndices;
-    for (size_t i = 0; i < scoreCount; i++)
-        if (!newTiedIndices.emplace(&scores[i], tiedRecord.parameterIndices[i]).second)
-            throw std::logic_error("coalesced move-score layout contains duplicate addresses");
+    for (const TiedMoveScoreSyncRecord &record : newTiedRecords)
+        for (size_t i = 0; i < record.parameterIndices.size(); i++)
+            if (!newTiedIndices.emplace(&record.scores[i], record.parameterIndices[i]).second)
+                throw std::logic_error("coalesced move-score layout contains duplicate addresses");
 
     struct StagedElement
     {
@@ -804,16 +836,14 @@ void Tuner::coalesceMoveScoreLayout(AdamOptimizer<TuneParam> &optimizer)
         }
     }
 
-    AdamOptimizer<TuneParam>             newOptimizer = optimizer.coalesced(stateGroups);
-    std::vector<TiedMoveScoreSyncRecord> newTiedRecords;
-    newTiedRecords.push_back(std::move(tiedRecord));
-    std::vector<std::pair<size_t, size_t>> newMoveScoreRanges {{rangeBegin, newParams.size()}};
-    std::vector<uint8_t>                   newTrainableParams(newParams.size(), uint8_t(1));
+    AdamOptimizer<TuneParam> newOptimizer = optimizer.coalesced(stateGroups);
+    std::vector<uint8_t>     newTrainableParams(newParams.size(), uint8_t(1));
 
     for (const StagedElement &staged : stagedElements)
         std::memcpy(staged.destination, staged.objectBytes.data(), staged.objectBytes.size());
-    for (size_t i = 0; i < scoreCount; i++)
-        scores[i] = quantizedScores[i];
+    for (const CoalescedTable &table : coalescedTables)
+        for (size_t i = 0; i < table.quantizedScores.size(); i++)
+            table.scores[i] = table.quantizedScores[i];
     optimizer.swap(newOptimizer);
     tuneParams.swap(newParams);
     syncRecords.swap(newSyncRecords);
@@ -824,8 +854,7 @@ void Tuner::coalesceMoveScoreLayout(AdamOptimizer<TuneParam> &optimizer)
     trainableParams.swap(newTrainableParams);
 
     MESSAGEL("Coalesced bootstrap move-score layout from "
-             << (rangeEnd - rangeBegin) << " parameters to "
-             << (moveScoreParamRanges.front().second - moveScoreParamRanges.front().first)
+             << oldPolicyParameterCount << " parameters to " << (tuneParams.size() - prefixEnd)
              << " tied parameters with conservative Adam state transport.");
 }
 
@@ -1071,6 +1100,43 @@ void Tuner::runImpl(size_t                               epochs,
     // Set Float output precision
     std::cout << std::setprecision(std::min(std::numeric_limits<Float>::digits10, 7)) << std::fixed;
 
+    const bool compactOnlyCurriculum =
+        phases
+        && std::all_of(phases->begin(), phases->end(), [](const TuningPhase &phase) {
+               return phase.trainCompactPolicy && !phase.tuneEval && !phase.tuneMoveScore;
+           });
+    if (compactOnlyCurriculum) {
+        MESSAGEL("Start compact-policy-only curriculum for " << epochs << " epochs.");
+        size_t globalEpoch = 0;
+        for (size_t phaseIndex = 0; phaseIndex < phases->size(); phaseIndex++) {
+            const TuningPhase &phase = (*phases)[phaseIndex];
+            if (phaseIndex != 0)
+                applyPhaseConfig(phase);
+            const size_t firstLocalEpoch = phaseIndex == 0 ? 0 : 1;
+            for (size_t localEpoch = firstLocalEpoch; localEpoch <= phase.epochs; localEpoch++) {
+                if (phaseIndex != 0 || localEpoch != 0)
+                    globalEpoch++;
+                if (callback) {
+                    TuningStatistic stat;
+                    stat.currentEpoch       = globalEpoch;
+                    stat.currentPhase       = phaseIndex;
+                    stat.currentPhaseEpoch  = localEpoch;
+                    stat.phaseName          = phase.name;
+                    stat.elapsedSeconds     = 0.001;
+                    stat.scalingFactor      = Evaluation::ScalingFactor;
+                    stat.learningRate       = 0;
+                    stat.trainCompactPolicy = true;
+                    callback(stat);
+                }
+            }
+        }
+        if (globalEpoch != epochs)
+            throw std::logic_error("compact-policy curriculum epoch count mismatch");
+        MESSAGEL("Compact-policy-only training completed in " << ((now() - initTime) / 1000)
+                                                                << " seconds.");
+        return;
+    }
+
     // Note: the last non-full batch of tune entries will be dropped.
     // Validate this before calibration, which may otherwise scan the corpus
     // many times only to discover that training cannot run.
@@ -1305,9 +1371,11 @@ void Tuner::initParams()
 
     // The tuner intentionally mutates the LIVE Evaluation:: tables in place
     // through these stored addresses: evaluation during tuning always sees the
-    // current candidate parameters without a copy/swap step.
-    for (int r : ruleSetIdx) {
-        if (config.tuneEval) {
+    // current candidate parameters without a copy/swap step. Evaluation ranges
+    // precede policy ranges so bootstrap policy tables form one terminal
+    // partition that can be coalesced independently.
+    if (config.tuneEval)
+        for (int r : ruleSetIdx) {
             size_t rangeBegin = tuneParams.size();
             addArrayParams<Eval>(
                 "eval/basic/table-" + std::to_string(r),
@@ -1331,7 +1399,8 @@ void Tuner::initParams()
             evalParamRanges.emplace_back(rangeBegin, tuneParams.size());
         }
 
-        if (config.tuneMoveScore) {
+    if (config.tuneMoveScore)
+        for (int r : ruleSetIdx) {
             size_t rangeBegin = tuneParams.size();
             if (config.trainingSemantics == TrainingSemantics::Bootstrap) {
                 addArrayParams<MoveScorePair, arraySize(Evaluation::P4SCORES[0]), 2>(
@@ -1361,9 +1430,8 @@ void Tuner::initParams()
                     });
             }
             moveScoreParamRanges.emplace_back(rangeBegin, tuneParams.size());
-            moveScoreTable = r;
+            moveScoreTables.push_back(r);
         }
-    }
 
     MESSAGEL(tuneParams.size() << " parameters initialized.");
 }

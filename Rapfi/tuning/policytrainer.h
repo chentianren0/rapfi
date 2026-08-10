@@ -21,12 +21,13 @@ namespace Tuning {
 
 struct PolicyTrainingConfig
 {
-    size_t epochs              = 0;
-    double learningRate        = 0;
-    double anchor              = 0;
-    double scoreScale          = 0;
-    int    residualLimit       = 0;
-    bool   equalBoardWeighting = false;
+    size_t           epochs              = 0;
+    double           learningRate        = 0;
+    double           anchor              = 0;
+    double           scoreScale          = 0;
+    int              residualLimit       = 0;
+    bool             equalBoardWeighting = false;
+    std::vector<int> destinationTables {FREESTYLE};
 };
 
 struct PolicyTrainingResult

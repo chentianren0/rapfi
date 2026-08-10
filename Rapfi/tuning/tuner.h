@@ -308,10 +308,10 @@ private:
     };
     std::vector<TiedMoveScoreSyncRecord>    tiedMoveScoreSyncRecords;
     std::vector<std::pair<size_t, size_t>>  moveScoreParamRanges;
+    std::vector<int>                        moveScoreTables;
     std::vector<std::pair<size_t, size_t>>  evalParamRanges;
     std::vector<MoveScoreReferencePosition> moveScoreReferencePositions;
     MoveScoreScaleReport                    moveScoreReference;
-    int                                     moveScoreTable = -1;
     struct ParameterAddress
     {
         ParameterId baseIndex;

@@ -45,6 +45,8 @@ namespace {
     struct Event
     {
         PolicyTraceSplit       split;
+        Rule                   rule      = FREESTYLE;
+        int                    table     = FREESTYLE;
         uint8_t                boardSize = 0;
         std::vector<Candidate> candidates;
         uint16_t               cutoff = MissingParameter;
@@ -62,16 +64,16 @@ namespace {
                || disposition == PolicyTraceDisposition::SearchedAlphaImprovement;
     }
 
-    uint16_t parameterIndex(uint8_t context, Pattern4 self, Pattern4 opponent)
+    uint16_t parameterIndex(size_t tableSlot, uint8_t context, Pattern4 self, Pattern4 opponent)
     {
         if (context >= ContextCount)
             return MissingParameter;
         if (self == FORBID || opponent == FORBID)
-            throw std::runtime_error("freestyle policy trace contains a forbidden pattern");
+            return MissingParameter;
         const size_t pair = Evaluation::policyPatternStorageIndex(self) * PatternCount
                             + Evaluation::policyPatternStorageIndex(opponent);
-        const size_t index = size_t(context) * PatternPairs + pair;
-        if (index >= ParameterCount)
+        const size_t index = tableSlot * ParameterCount + size_t(context) * PatternPairs + pair;
+        if (index >= size_t(MissingParameter))
             throw std::logic_error("policy parameter index exceeds compact surface");
         return static_cast<uint16_t>(index);
     }
@@ -82,80 +84,94 @@ namespace {
         return Evaluation::classicalPolicyBaseScore(rule, self, pcodeBlack, pcodeWhite);
     }
 
-    Corpus readCorpus(const std::vector<std::filesystem::path> &paths)
+    Corpus readCorpus(const std::vector<std::filesystem::path> &paths,
+                      const std::vector<int>                   &destinationTables)
     {
+        if (destinationTables.empty())
+            throw std::invalid_argument("policy training requires a destination table");
+        for (size_t i = 0; i < destinationTables.size(); i++) {
+            if (destinationTables[i] < 0 || destinationTables[i] >= RULE_NB + 1)
+                throw std::invalid_argument("policy destination table is invalid");
+            if (std::find(destinationTables.begin(),
+                          destinationTables.begin() + i,
+                          destinationTables[i])
+                != destinationTables.begin() + i)
+                throw std::invalid_argument("policy destination tables contain a duplicate");
+        }
         Corpus corpus;
         for (const std::filesystem::path &path : paths) {
             readPolicyTrace(path, [&](const PolicyTraceEvent &source) {
-                    if (source.rule != FREESTYLE)
-                        throw std::runtime_error(
-                            "policy trace trainer supports freestyle events only");
-                    Board board(source.boardSize);
-                    board.newGame(source.rule);
-                    for (Pos move : source.history) {
-                        if (move != Pos::PASS && !board.isLegal(move))
-                            throw std::runtime_error(
-                                "policy trace history contains an illegal move");
-                        board.move(source.rule, move);
-                    }
-                    if (board.zobristKey() != source.positionKey
-                        || board.sideToMove() != source.sideToMove)
-                        throw std::runtime_error(
-                            "policy trace position does not match its history");
-                    const uint8_t policyContext =
-                        static_cast<uint8_t>(Evaluation::classifyPolicyContext(board));
-                    std::vector<const PolicyTraceCandidate *> eligible;
-                    for (const PolicyTraceCandidate &candidate : source.candidates)
-                        if (candidate.policyOrdinal != std::numeric_limits<uint16_t>::max())
-                            eligible.push_back(&candidate);
-                    std::sort(eligible.begin(),
-                              eligible.end(),
-                              [](const auto *lhs, const auto *rhs) {
-                                  return lhs->policyOrdinal < rhs->policyOrdinal;
-                              });
-                    if (eligible.size() < 2)
-                        return;
-                    if (eligible.size() >= MissingParameter)
-                        throw std::runtime_error("policy trace has too many eligible candidates");
+                const int  table = Evaluation::tableIndex(source.rule, source.sideToMove);
+                const auto selected =
+                    std::find(destinationTables.begin(), destinationTables.end(), table);
+                if (selected == destinationTables.end())
+                    return;
+                const size_t tableSlot = size_t(selected - destinationTables.begin());
+                Board        board(source.boardSize);
+                board.newGame(source.rule);
+                for (Pos move : source.history) {
+                    if (move != Pos::PASS && !board.isLegal(move))
+                        throw std::runtime_error("policy trace history contains an illegal move");
+                    board.move(source.rule, move);
+                }
+                if (board.zobristKey() != source.positionKey
+                    || board.sideToMove() != source.sideToMove)
+                    throw std::runtime_error("policy trace position does not match its history");
+                const uint8_t policyContext =
+                    static_cast<uint8_t>(Evaluation::classifyPolicyContext(board));
+                std::vector<const PolicyTraceCandidate *> eligible;
+                for (const PolicyTraceCandidate &candidate : source.candidates)
+                    if (candidate.policyOrdinal != std::numeric_limits<uint16_t>::max())
+                        eligible.push_back(&candidate);
+                std::sort(eligible.begin(), eligible.end(), [](const auto *lhs, const auto *rhs) {
+                    return lhs->policyOrdinal < rhs->policyOrdinal;
+                });
+                if (eligible.size() < 2)
+                    return;
+                if (eligible.size() >= MissingParameter)
+                    throw std::runtime_error("policy trace has too many eligible candidates");
 
-                    Event event;
-                    event.split     = source.split;
-                    event.boardSize = source.boardSize;
-                    event.candidates.reserve(eligible.size());
-                    for (size_t ordinal = 0; ordinal < eligible.size(); ordinal++) {
-                        const PolicyTraceCandidate &candidate = *eligible[ordinal];
-                        if (!board.isEmpty(candidate.move))
-                            throw std::runtime_error("policy trace candidate is not empty");
-                        const int64_t runtimeOffset =
-                            int64_t(candidate.mainHistory) + int64_t(candidate.counterMove);
-                        if (runtimeOffset < std::numeric_limits<int32_t>::min()
-                            || runtimeOffset > std::numeric_limits<int32_t>::max())
-                            throw std::runtime_error("policy trace runtime offset overflows int32");
-                        const auto [pcodeBlack, pcodeWhite] = board.pcodePair(candidate.move);
-                        event.candidates.push_back(
-                            {parameterIndex(policyContext,
-                                            board.pattern4(candidate.move, board.sideToMove()),
-                                            board.pattern4(candidate.move, ~board.sideToMove())),
-                             board.sideToMove(),
-                             pcodeBlack,
-                             pcodeWhite,
-                             currentBasePositionScore(source.rule,
-                                                      board.sideToMove(),
-                                                      pcodeBlack,
-                                                      pcodeWhite),
-                             static_cast<int32_t>(runtimeOffset)});
-                        if (candidate.disposition == PolicyTraceDisposition::SearchedCutoff)
-                            event.cutoff = static_cast<uint16_t>(ordinal);
-                        else if (searchedNonCutoff(candidate.disposition)
-                                 && event.cutoff == MissingParameter)
-                            event.earlierSearched.push_back(static_cast<uint16_t>(ordinal));
-                    }
+                Event event;
+                event.split     = source.split;
+                event.rule      = source.rule;
+                event.table     = table;
+                event.boardSize = source.boardSize;
+                event.candidates.reserve(eligible.size());
+                for (size_t ordinal = 0; ordinal < eligible.size(); ordinal++) {
+                    const PolicyTraceCandidate &candidate = *eligible[ordinal];
+                    if (!board.isEmpty(candidate.move))
+                        throw std::runtime_error("policy trace candidate is not empty");
+                    const int64_t runtimeOffset =
+                        int64_t(candidate.mainHistory) + int64_t(candidate.counterMove);
+                    if (runtimeOffset < std::numeric_limits<int32_t>::min()
+                        || runtimeOffset > std::numeric_limits<int32_t>::max())
+                        throw std::runtime_error("policy trace runtime offset overflows int32");
+                    const auto [pcodeBlack, pcodeWhite] = board.pcodePair(candidate.move);
+                    event.candidates.push_back(
+                        {parameterIndex(tableSlot,
+                                        policyContext,
+                                        board.pattern4(candidate.move, board.sideToMove()),
+                                        board.pattern4(candidate.move, ~board.sideToMove())),
+                         board.sideToMove(),
+                         pcodeBlack,
+                         pcodeWhite,
+                         currentBasePositionScore(source.rule,
+                                                  board.sideToMove(),
+                                                  pcodeBlack,
+                                                  pcodeWhite),
+                         static_cast<int32_t>(runtimeOffset)});
+                    if (candidate.disposition == PolicyTraceDisposition::SearchedCutoff)
+                        event.cutoff = static_cast<uint16_t>(ordinal);
+                    else if (searchedNonCutoff(candidate.disposition)
+                             && event.cutoff == MissingParameter)
+                        event.earlierSearched.push_back(static_cast<uint16_t>(ordinal));
+                }
 
-                    if (source.nodeType != PolicyTraceNodeType::NonPv
-                        || int64_t(source.beta) != int64_t(source.alpha) + 1
-                        || event.cutoff == MissingParameter)
-                        event.earlierSearched.clear();
-                    corpus.events.push_back(std::move(event));
+                if (source.nodeType != PolicyTraceNodeType::NonPv
+                    || int64_t(source.beta) != int64_t(source.alpha) + 1
+                    || event.cutoff == MissingParameter)
+                    event.earlierSearched.clear();
+                corpus.events.push_back(std::move(event));
             });
         }
         return corpus;
@@ -197,12 +213,18 @@ namespace {
                 raw > minimum && raw < maximum ? position.derivative : 0.0};
     }
 
-    bool hasTrainableParameter(const Event &event)
+    bool hasTrainablePair(const Event &event)
     {
-        return std::any_of(
-            event.candidates.begin(),
-            event.candidates.end(),
-            [](const Candidate &candidate) { return candidate.parameter != MissingParameter; });
+        if (event.cutoff == MissingParameter || event.cutoff >= event.candidates.size())
+            return false;
+        if (event.candidates[event.cutoff].parameter != MissingParameter)
+            return true;
+        return std::any_of(event.earlierSearched.begin(),
+                           event.earlierSearched.end(),
+                           [&](uint16_t earlier) {
+                               return earlier < event.candidates.size()
+                                      && event.candidates[earlier].parameter != MissingParameter;
+                           });
     }
 
     void accumulateGradient(const Event               &event,
@@ -232,19 +254,21 @@ namespace {
         }
     }
 
-    std::vector<double> initialParameters()
+    std::vector<double> initialParameters(const std::vector<int> &destinationTables)
     {
-        std::vector<double> parameters(ParameterCount);
-        for (size_t context = 0; context < ContextCount; context++)
-            for (size_t self = 0; self < PatternCount; self++)
-                for (size_t opponent = 0; opponent < PatternCount; opponent++) {
-                    const size_t index = (context * PatternCount + self) * PatternCount + opponent;
-                    parameters[index] =
-                        Evaluation::POLICY_CROSS[FREESTYLE][context]
-                                                [Evaluation::policyPatternFromStorageIndex(self)]
-                                                [Evaluation::policyPatternFromStorageIndex(
-                                                    opponent)];
-                }
+        std::vector<double> parameters(ParameterCount * destinationTables.size());
+        for (size_t tableSlot = 0; tableSlot < destinationTables.size(); tableSlot++)
+            for (size_t context = 0; context < ContextCount; context++)
+                for (size_t self = 0; self < PatternCount; self++)
+                    for (size_t opponent = 0; opponent < PatternCount; opponent++) {
+                        const size_t index = tableSlot * ParameterCount
+                                             + (context * PatternCount + self) * PatternCount
+                                             + opponent;
+                        parameters[index] = Evaluation::POLICY_CROSS
+                            [destinationTables[tableSlot]][context]
+                            [Evaluation::policyPatternFromStorageIndex(self)]
+                            [Evaluation::policyPatternFromStorageIndex(opponent)];
+                    }
         return parameters;
     }
 
@@ -259,18 +283,21 @@ namespace {
         return rounded;
     }
 
-    void installParameters(const std::vector<Score> &parameters)
+    void installParameters(const std::vector<Score> &parameters,
+                           const std::vector<int>   &destinationTables)
     {
-        Evaluation::resetPolicyCross();
-        for (size_t context = 0; context < ContextCount; context++)
-            for (size_t self = 0; self < PatternCount; self++)
-                for (size_t opponent = 0; opponent < PatternCount; opponent++) {
-                    const size_t index = (context * PatternCount + self) * PatternCount + opponent;
-                    Evaluation::POLICY_CROSS[FREESTYLE][context]
-                                            [Evaluation::policyPatternFromStorageIndex(self)]
-                                            [Evaluation::policyPatternFromStorageIndex(opponent)] =
-                                                parameters[index];
-                }
+        for (size_t tableSlot = 0; tableSlot < destinationTables.size(); tableSlot++)
+            for (size_t context = 0; context < ContextCount; context++)
+                for (size_t self = 0; self < PatternCount; self++)
+                    for (size_t opponent = 0; opponent < PatternCount; opponent++) {
+                        const size_t index = tableSlot * ParameterCount
+                                             + (context * PatternCount + self) * PatternCount
+                                             + opponent;
+                        Evaluation::POLICY_CROSS[destinationTables[tableSlot]][context]
+                                                [Evaluation::policyPatternFromStorageIndex(self)]
+                                                [Evaluation::policyPatternFromStorageIndex(
+                                                    opponent)] = parameters[index];
+                    }
         Evaluation::activatePolicyCross();
     }
 
@@ -281,24 +308,35 @@ struct PolicyTraceTrainer::Impl
     Impl(const std::vector<std::filesystem::path> &tracePaths,
          const PolicyTrainingConfig               &trainingConfig)
         : config(trainingConfig)
-        , corpus(readCorpus(tracePaths))
-        , parameters(initialParameters())
+        , corpus(readCorpus(tracePaths, config.destinationTables))
+        , parameters(initialParameters(config.destinationTables))
         , initial(parameters)
-        , optimizer(ParameterCount, config.learningRate, 0.0, 0.9, 0.999, 1e-8)
+        , optimizer(parameters.size(), config.learningRate, 0.0, 0.9, 0.999, 1e-8)
     {
         std::array<size_t, MAX_BOARD_SIZE + 1> boardEventCounts {};
+        std::array<size_t, RULE_NB + 1>        tableEventCounts {};
         size_t                                 trainableEvents = 0;
         for (const Event &event : corpus.events) {
             if (event.split != PolicyTraceSplit::Train || event.earlierSearched.empty()
-                || !hasTrainableParameter(event))
+                || !hasTrainablePair(event))
                 continue;
             if (event.boardSize == 0 || event.boardSize > MAX_BOARD_SIZE)
                 throw std::logic_error("policy event has an invalid board size");
             boardEventCounts[event.boardSize]++;
+            tableEventCounts[event.table]++;
             trainableEvents++;
         }
         if (trainableEvents == 0)
             throw std::runtime_error("policy corpus has no trainable natural-cutoff events");
+        tableEventWeights.fill(0.0);
+        for (int table : config.destinationTables) {
+            if (tableEventCounts[table] == 0)
+                throw std::runtime_error(
+                    "policy corpus has no trainable natural-cutoff events for a selected table");
+            tableEventWeights[table] =
+                double(trainableEvents)
+                / double(config.destinationTables.size() * tableEventCounts[table]);
+        }
 
         boardEventWeights.fill(1.0);
         if (config.equalBoardWeighting) {
@@ -316,13 +354,14 @@ struct PolicyTraceTrainer::Impl
 
     void step()
     {
-        std::vector<double> gradient(ParameterCount);
+        std::vector<double> gradient(parameters.size());
         double              mass = 0;
         for (const Event &event : corpus.events) {
             if (event.split != PolicyTraceSplit::Train || event.earlierSearched.empty()
-                || !hasTrainableParameter(event))
+                || !hasTrainablePair(event))
                 continue;
-            const double eventWeight = boardEventWeights[event.boardSize];
+            const double eventWeight =
+                boardEventWeights[event.boardSize] * tableEventWeights[event.table];
             accumulateGradient(event,
                                gradient,
                                parameters,
@@ -334,8 +373,8 @@ struct PolicyTraceTrainer::Impl
         if (mass <= 0)
             throw std::logic_error("policy corpus has non-positive optimization mass");
         for (size_t i = 0; i < gradient.size(); i++)
-            gradient[i] =
-                gradient[i] / mass + config.anchor * (parameters[i] - initial[i]) / ParameterCount;
+            gradient[i] = gradient[i] / mass
+                          + config.anchor * (parameters[i] - initial[i]) / parameters.size();
         optimizer.step(parameters, gradient);
         for (double &parameter : parameters)
             parameter =
@@ -346,7 +385,7 @@ struct PolicyTraceTrainer::Impl
     {
         for (Event &event : corpus.events)
             for (Candidate &candidate : event.candidates)
-                candidate.positionScore = currentBasePositionScore(FREESTYLE,
+                candidate.positionScore = currentBasePositionScore(event.rule,
                                                                    candidate.self,
                                                                    candidate.pcodeBlack,
                                                                    candidate.pcodeWhite);
@@ -361,7 +400,7 @@ struct PolicyTraceTrainer::Impl
 
         PolicyTrainingResult     result;
         const std::vector<Score> rounded = roundedParameters(parameters, config.residualLimit);
-        result.parameterCount            = ParameterCount;
+        result.parameterCount            = parameters.size();
         result.minimum   = rounded.empty() ? 0 : *std::min_element(rounded.begin(), rounded.end());
         result.maximum   = rounded.empty() ? 0 : *std::max_element(rounded.begin(), rounded.end());
         double squareSum = 0;
@@ -371,7 +410,7 @@ struct PolicyTraceTrainer::Impl
 
         bool published = false;
         try {
-            installParameters(rounded);
+            installParameters(rounded, config.destinationTables);
             std::ofstream output(temporaryPath, std::ios::binary);
             if (!output)
                 throw std::runtime_error("unable to open temporary policy model output");
@@ -398,6 +437,7 @@ struct PolicyTraceTrainer::Impl
     std::vector<double>                    parameters;
     std::vector<double>                    initial;
     std::array<double, MAX_BOARD_SIZE + 1> boardEventWeights;
+    std::array<double, RULE_NB + 1>        tableEventWeights;
     AdamOptimizer<double>                  optimizer;
 };
 

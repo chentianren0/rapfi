@@ -55,6 +55,19 @@ void parseTuningRules(TuningConfig &cfg, std::vector<std::string> rules)
     }
 }
 
+int parsePolicyTable(const std::string &table)
+{
+    if (table == "freestyle")
+        return FREESTYLE;
+    if (table == "standard")
+        return STANDARD;
+    if (table == "renju-black")
+        return RENJU + BLACK;
+    if (table == "renju-white")
+        return RENJU + WHITE;
+    throw std::invalid_argument("unknown compact policy table " + table);
+}
+
 LossType parseLossType(std::string lossType)
 {
     if (lossType == "L1")
@@ -112,13 +125,13 @@ TrainingSemantics parseTrainingSemantics(const std::string &semantics)
     throw std::invalid_argument("unknown training semantics " + semantics);
 }
 
-void validateConfig(size_t epochs, const TuningConfig &cfg)
+void validateConfig(size_t epochs, const TuningConfig &cfg, bool tuneCompactPolicy)
 {
     if (epochs < 1)
         throw std::invalid_argument("epochs must be greater than 0");
     if (!(cfg.tuneRule[FREESTYLE] || cfg.tuneRule[STANDARD] || cfg.tuneRule[RENJU]))
         throw std::invalid_argument("there must be at least one rule to tune");
-    if (!(cfg.tuneEval || cfg.tuneMoveScore))
+    if (!(cfg.tuneEval || cfg.tuneMoveScore || tuneCompactPolicy))
         throw std::invalid_argument("at least one tuning objective must be enabled");
     if (cfg.batchSize < 1)
         throw std::invalid_argument("batchsize must be greater than 0");
@@ -162,12 +175,6 @@ void validateConfig(size_t epochs, const TuningConfig &cfg)
         throw std::invalid_argument(
             "multipv-policy-eval-scale requires multipv-policy-temperature greater than 0");
     if (cfg.tuneMoveScore) {
-        size_t tunedTableCount = size_t(cfg.tuneRule[FREESTYLE])
-                                 + size_t(cfg.tuneRule[STANDARD])
-                                 + 2 * size_t(cfg.tuneRule[RENJU]);
-        if (tunedTableCount != 1 && cfg.trainingSemantics == TrainingSemantics::Bootstrap)
-            throw std::invalid_argument(
-                "multi-table policy tuning requires current training semantics");
         auto tunesTable = [&](int table) {
             return table == FREESTYLE && cfg.tuneRule[FREESTYLE]
                    || table == STANDARD && cfg.tuneRule[STANDARD]
@@ -525,6 +532,9 @@ int Command::tuning(int argc, char *argv[])
         ("policy-trace-dataset",
          "Policy trace file(s); selects compact policy-residual training",
          cxxopts::value<std::vector<std::string>>())  //
+        ("policy-trace-tables",
+         "Compact policy destination table(s): freestyle, standard, renju-black, renju-white",
+         cxxopts::value<std::vector<std::string>>()->default_value("freestyle"))  //
         ("policy-anchor",
          "L2 anchor strength for compact policy-residual training",
          cxxopts::value<double>())  //
@@ -686,6 +696,10 @@ int Command::tuning(int argc, char *argv[])
                 policyConfig.equalBoardWeighting =
                     parseBoardSizeWeighting(args["board-size-weighting"].as<std::string>())
                     == BoardSizeWeighting::EqualBoard;
+                policyConfig.destinationTables.clear();
+                for (const std::string &table :
+                     args["policy-trace-tables"].as<std::vector<std::string>>())
+                    policyConfig.destinationTables.push_back(parsePolicyTable(table));
             }
 
             parseTuningRules(cfg, args["rules-to-tune"].as<std::vector<std::string>>());
@@ -808,7 +822,7 @@ int Command::tuning(int argc, char *argv[])
                 throw std::invalid_argument(
                     "curriculum policy traces require a compact_policy phase objective");
         }
-        validateConfig(epochs, cfg);
+        validateConfig(epochs, cfg, !policyTracePaths.empty());
 
         // Create output directory
         ensureDir(outdir);
