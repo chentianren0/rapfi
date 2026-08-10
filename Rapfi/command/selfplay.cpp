@@ -285,6 +285,26 @@ struct SelfplayConfig
     std::string                   outputPath;
 };
 
+void validateOpeningBook(const std::vector<std::vector<Pos>> &openings,
+                         int                                  boardSize,
+                         Rule                                 rule)
+{
+    Board board(boardSize);
+    for (size_t openingIndex = 0; openingIndex < openings.size(); openingIndex++) {
+        board.newGame(rule);
+        for (size_t ply = 0; ply < openings[openingIndex].size(); ply++) {
+            Pos move = openings[openingIndex][ply];
+            if (!board.isInBoard(move) || !board.isEmpty(move)
+                || (rule == RENJU && board.sideToMove() == BLACK
+                    && board.checkForbiddenPoint(move)))
+                throw std::invalid_argument("illegal opening move at opening "
+                                            + std::to_string(openingIndex + 1) + ", ply "
+                                            + std::to_string(ply + 1));
+            board.move(rule, move);
+        }
+    }
+}
+
 /// Put an opening on the fresh `board`: either an auto-generated (balanced) opening,
 /// or a random book opening under a random symmetry transform. No-op when neither
 /// source is configured (game starts from the empty board).
@@ -584,6 +604,8 @@ SelfplayConfig parseSelfplayArguments(int argc, char *argv[])
 
             cfg.numGames          = args["number"].as<size_t>();
             cfg.rule              = parseRule(args["rule"].as<std::string>());
+            if (!cfg.openings.empty())
+                validateOpeningBook(cfg.openings, cfg.boardSizeMin, cfg.rule);
             cfg.numThreads        = std::max<size_t>(args["thread"].as<size_t>(), 1);
             cfg.hashSizeMb        = std::max<size_t>(args["hashsize"].as<size_t>(), 1);
             cfg.multipv           = std::max(args["multipv"].as<int>(), 1);
