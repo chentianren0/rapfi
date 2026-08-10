@@ -62,6 +62,36 @@ static void                     setupSignalHandler(std::function<void(int)> hand
 #endif
 }
 
+static void resetSignalHandler()
+{
+    signalFunc = nullptr;
+    std::signal(SIGINT, SIG_DFL);
+    std::signal(SIGTERM, SIG_DFL);
+    std::signal(SIGSEGV, SIG_DFL);
+    std::signal(SIGILL, SIG_DFL);
+    std::signal(SIGABRT, SIG_DFL);
+    std::signal(SIGFPE, SIG_DFL);
+#ifdef SIGHUP
+    std::signal(SIGHUP, SIG_DFL);
+#endif
+#ifdef SIGQUIT
+    std::signal(SIGQUIT, SIG_DFL);
+#endif
+}
+
+class SignalHandlerScope
+{
+public:
+    explicit SignalHandlerScope(std::function<void(int)> handler)
+    {
+        setupSignalHandler(std::move(handler));
+    }
+    ~SignalHandlerScope() { resetSignalHandler(); }
+
+    SignalHandlerScope(const SignalHandlerScope &)            = delete;
+    SignalHandlerScope &operator=(const SignalHandlerScope &) = delete;
+};
+
 using namespace Tuning;
 
 namespace {
@@ -807,7 +837,7 @@ void Command::selfplay(int argc, char *argv[])
     // Setup signal handler to close dataset file when receiving signal. Termination
     // requests exit cleanly; fault signals (SIGSEGV etc.) still flush the writer but
     // must report the crash and exit nonzero instead of masquerading as success.
-    setupSignalHandler([&](int signal) {
+    SignalHandlerScope signalHandler([&](int signal) {
         bool requested = signal == SIGINT || signal == SIGTERM;
         if (requested)
             MESSAGEL("Gracefully exiting...");
@@ -868,6 +898,12 @@ void Command::selfplay(int argc, char *argv[])
             lastTime = now();
         }
     }
+
+    // Release rule-specific worker state while the command's signal callback and
+    // writer are still alive. This avoids deferring evaluator/thread destruction to
+    // static shutdown, after the callback's captured locals no longer exist.
+    Search::Engine.setNumThreads(0);
+    dataWriter.reset();
 
     MESSAGEL("Completed playing " << cfg.numGames << " games.");
 }
