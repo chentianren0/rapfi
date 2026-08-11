@@ -95,7 +95,7 @@ extern Eval          EVALS[RULE_NB + 1][PCODE_NB];
 extern Eval          EVALS_THREAT[RULE_NB + 1][THREAT_NB];
 extern MoveScorePair P4SCORES[RULE_NB + 1][PCODE_NB];
 
-/// Optional low-dimensional post-processing for the freestyle classical value.
+/// Optional low-dimensional post-processing for a rule's classical value.
 /// The readout is an odd monotone piecewise-linear map over normalized value,
 /// with fixed x knots {0, 0.5, 1, 2, 4, 8}. The knots live in config.toml so
 /// the underlying model artifact remains independently reproducible.
@@ -107,14 +107,14 @@ struct ClassicalValueReadout
     std::array<double, KnotCount> knots {};
 };
 
-extern ClassicalValueReadout CLASSICAL_VALUE_READOUT;
+extern std::array<ClassicalValueReadout, RULE_NB> CLASSICAL_VALUE_READOUTS;
 
-void  refreshClassicalValueReadoutCache();
-Value mapClassicalValue(Value rawValue);
+void  refreshClassicalValueReadoutCaches();
+Value mapClassicalValue(Rule rule, Value rawValue);
 
 inline bool isClassicalValueReadoutActive(Rule rule)
 {
-    return rule == FREESTYLE && CLASSICAL_VALUE_READOUT.knotsActive;
+    return CLASSICAL_VALUE_READOUTS[rule].knotsActive;
 }
 
 inline bool isClassicalPostprocessActive(Rule rule)

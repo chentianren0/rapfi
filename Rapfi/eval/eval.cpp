@@ -156,7 +156,7 @@ Value evaluate(const Board &board, Rule rule)
 
 Value computeClassicalValue(Rule rule, Value rawValue)
 {
-    return isClassicalValueReadoutActive(rule) ? mapClassicalValue(rawValue) : rawValue;
+    return isClassicalValueReadoutActive(rule) ? mapClassicalValue(rule, rawValue) : rawValue;
 }
 
 ValueType computeEvaluatorValue(const Board &board)
