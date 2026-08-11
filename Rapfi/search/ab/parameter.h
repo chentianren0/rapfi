@@ -237,9 +237,9 @@ constexpr Depth complexityReduction(bool trivialMove, bool importantMove, bool d
 template <Rule R>
 constexpr Depth policyReduction(float normalizedPolicyScore)
 {
-    constexpr Depth PolicyReductionScale[RULE_NB] = {3.14f, 2.95f, 3.2f};
-    constexpr Depth PolicyReductionBias[RULE_NB]  = {2.21f, 3.81f, 4.0f};
-    constexpr Depth PolicyReductionMax[RULE_NB]   = {5.00f, 3.76f, 5.1f};
+    constexpr Depth PolicyReductionScale[RULE_NB] = {3.14f, 2.81f, 3.17f};
+    constexpr Depth PolicyReductionBias[RULE_NB]  = {2.21f, 3.91f, 3.96f};
+    constexpr Depth PolicyReductionMax[RULE_NB]   = {5.00f, 3.77f, 5.05f};
 
     Depth r = PolicyReductionBias[R] - PolicyReductionScale[R] * normalizedPolicyScore;
     return std::min(std::max(r, 0.0f), PolicyReductionMax[R]);
@@ -249,8 +249,8 @@ constexpr Depth policyReduction(float normalizedPolicyScore)
 template <Rule R>
 constexpr int policyPruningScore(Depth d)
 {
-    constexpr int PPBias[RULE_NB]  = {394, 370, 376};
-    constexpr int PPScale[RULE_NB] = {46, 55, 63};
+    constexpr int PPBias[RULE_NB]  = {394, 365, 377};
+    constexpr int PPScale[RULE_NB] = {46, 52, 62};
     return PPBias[R] - int(d * PPScale[R]);
 }
 
