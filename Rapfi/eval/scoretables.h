@@ -95,6 +95,12 @@ extern Eval          EVALS[RULE_NB + 1][PCODE_NB];
 extern Eval          EVALS_THREAT[RULE_NB + 1][THREAT_NB];
 extern MoveScorePair P4SCORES[RULE_NB + 1][PCODE_NB];
 
+/// Get table index for rule and color.
+constexpr int tableIndex(Rule r, Color c)
+{
+    return r + (r == Rule::RENJU ? c : 0);
+}
+
 /// Optional low-dimensional post-processing for a rule's classical value.
 /// The readout is an odd monotone piecewise-linear map over normalized value,
 /// with fixed x knots {0, 0.5, 1, 2, 4, 8}. The knots live in config.toml so
@@ -107,25 +113,19 @@ struct ClassicalValueReadout
     std::array<double, KnotCount> knots {};
 };
 
-extern std::array<ClassicalValueReadout, RULE_NB> CLASSICAL_VALUE_READOUTS;
+extern std::array<ClassicalValueReadout, RULE_NB + 1> CLASSICAL_VALUE_READOUTS;
 
 void  refreshClassicalValueReadoutCaches();
-Value mapClassicalValue(Rule rule, Value rawValue);
+Value mapClassicalValue(Rule rule, Color self, Value rawValue);
 
-inline bool isClassicalValueReadoutActive(Rule rule)
+inline bool isClassicalValueReadoutActive(Rule rule, Color self)
 {
-    return CLASSICAL_VALUE_READOUTS[rule].knotsActive;
+    return CLASSICAL_VALUE_READOUTS[tableIndex(rule, self)].knotsActive;
 }
 
-inline bool isClassicalPostprocessActive(Rule rule)
+inline bool isClassicalPostprocessActive(Rule rule, Color self)
 {
-    return isClassicalValueReadoutActive(rule);
-}
-
-/// Get table index for rule and color.
-constexpr int tableIndex(Rule r, Color c)
-{
-    return r + (r == Rule::RENJU ? c : 0);
+    return isClassicalValueReadoutActive(rule, self);
 }
 
 /// Lookup eval table with color and pcode of rule R.

@@ -90,11 +90,11 @@ float ScalingFactor = 200.0f;
 // Classical evaluation and score tables
 // Note that Renju has asymmetry eval and score
 
-Eval                                       EVALS[RULE_NB + 1][PCODE_NB];
-Eval                                       EVALS_THREAT[RULE_NB + 1][THREAT_NB];
-MoveScorePair                              P4SCORES[RULE_NB + 1][PCODE_NB];
-std::array<ClassicalValueReadout, RULE_NB> CLASSICAL_VALUE_READOUTS;
-std::array<std::array<Value, VALUE_EVAL_MAX - VALUE_EVAL_MIN + 1>, RULE_NB>
+Eval                                           EVALS[RULE_NB + 1][PCODE_NB];
+Eval                                           EVALS_THREAT[RULE_NB + 1][THREAT_NB];
+MoveScorePair                                  P4SCORES[RULE_NB + 1][PCODE_NB];
+std::array<ClassicalValueReadout, RULE_NB + 1> CLASSICAL_VALUE_READOUTS;
+std::array<std::array<Value, VALUE_EVAL_MAX - VALUE_EVAL_MIN + 1>, RULE_NB + 1>
      CLASSICAL_VALUE_READOUT_CACHES {};
 void refreshClassicalValueReadoutCaches()
 {
@@ -102,11 +102,12 @@ void refreshClassicalValueReadoutCaches()
         {0.0, 0.5, 1.0, 2.0, 4.0, 8.0};
     const double scale = ScalingFactor;
 
-    for (size_t rule = 0; rule < RULE_NB; rule++) {
-        if (!CLASSICAL_VALUE_READOUTS[rule].knotsActive)
+    for (size_t readoutIndex = 0; readoutIndex < CLASSICAL_VALUE_READOUTS.size();
+         readoutIndex++) {
+        if (!CLASSICAL_VALUE_READOUTS[readoutIndex].knotsActive)
             continue;
-        const auto &yKnots = CLASSICAL_VALUE_READOUTS[rule].knots;
-        auto       &cache  = CLASSICAL_VALUE_READOUT_CACHES[rule];
+        const auto &yKnots = CLASSICAL_VALUE_READOUTS[readoutIndex].knots;
+        auto       &cache  = CLASSICAL_VALUE_READOUT_CACHES[readoutIndex];
         for (int raw = VALUE_EVAL_MIN; raw <= VALUE_EVAL_MAX; raw++) {
             double x = std::abs(double(raw)) / scale;
             double y;
@@ -127,10 +128,11 @@ void refreshClassicalValueReadoutCaches()
     }
 }
 
-Value mapClassicalValue(Rule rule, Value rawValue)
+Value mapClassicalValue(Rule rule, Color self, Value rawValue)
 {
     assert(VALUE_EVAL_MIN <= rawValue && rawValue <= VALUE_EVAL_MAX);
-    return CLASSICAL_VALUE_READOUT_CACHES[rule][int(rawValue) - VALUE_EVAL_MIN];
+    return CLASSICAL_VALUE_READOUT_CACHES[tableIndex(rule, self)]
+                                         [int(rawValue) - VALUE_EVAL_MIN];
 }
 
 }  // namespace Evaluation
@@ -156,7 +158,7 @@ struct PendingConfig
     Search::TimeConfig                                     time     = Search::TimeCfg;
     Database::DatabaseConfig                               database = Database::DatabaseCfg;
     Evaluation::EvaluatorConfig                            eval     = Evaluation::EvalCfg;
-    std::array<Evaluation::ClassicalValueReadout, RULE_NB> valueReadouts =
+    std::array<Evaluation::ClassicalValueReadout, RULE_NB + 1> valueReadouts =
         Evaluation::CLASSICAL_VALUE_READOUTS;
 
     /// "[search] default_searcher" was present: switch the searcher at commit.
@@ -563,7 +565,7 @@ void Config::readModel(const cpptoml::table &t, PendingConfig &pending)
     double configuredScalingFactor =
         t.get_as<double>("scaling_factor").value_or(Evaluation::ScalingFactor);
     float runtimeScalingFactor = static_cast<float>(configuredScalingFactor);
-    auto  readReadoutKnots     = [&](const char *key, Rule rule) {
+    auto  readReadoutKnots     = [&](const char *key, size_t readoutIndex) {
         auto readoutKnots = t.get_array_of<double>(key);
         if (!readoutKnots)
             return;
@@ -576,13 +578,16 @@ void Config::readModel(const cpptoml::table &t, PendingConfig &pending)
                 throw std::runtime_error(std::string(key)
                                          + " must be finite, monotone, start at zero, and not "
                                                 "exceed 64");
-            pending.valueReadouts[rule].knots[i] = value;
+            pending.valueReadouts[readoutIndex].knots[i] = value;
         }
-        pending.valueReadouts[rule].knotsActive = true;
+        pending.valueReadouts[readoutIndex].knotsActive = true;
     };
     readReadoutKnots("value_readout_knots", FREESTYLE);
     readReadoutKnots("value_readout_knots_standard", STANDARD);
-    readReadoutKnots("value_readout_knots_renju", RENJU);
+    readReadoutKnots("value_readout_knots_renju", Evaluation::tableIndex(RENJU, BLACK));
+    readReadoutKnots("value_readout_knots_renju", Evaluation::tableIndex(RENJU, WHITE));
+    readReadoutKnots("value_readout_knots_renju_black", Evaluation::tableIndex(RENJU, BLACK));
+    readReadoutKnots("value_readout_knots_renju_white", Evaluation::tableIndex(RENJU, WHITE));
 
     bool anyReadoutActive = std::any_of(pending.valueReadouts.begin(),
                                         pending.valueReadouts.end(),
