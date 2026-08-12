@@ -86,7 +86,7 @@ public:
     std::unique_ptr<SearchData> makeSearchData(SearchThread &th) override { return nullptr; }
 
     /// Set the memory size limit of the search.
-    void setMemoryLimit(size_t memorySizeKB) override;
+    bool setMemoryLimit(size_t memorySizeKB) override;
 
     /// Get the current memory size limit of the search.
     size_t getMemoryLimit() const override;

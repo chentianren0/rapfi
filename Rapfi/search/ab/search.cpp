@@ -254,9 +254,9 @@ void ABSearchData::clearData(SearchThread &th)
     counterMoveHistory.init(std::make_pair(Pos::NONE, NONE));
 }
 
-void ABSearcher::setMemoryLimit(size_t memorySizeKB)
+bool ABSearcher::setMemoryLimit(size_t memorySizeKB)
 {
-    TT.resize(memorySizeKB);
+    return TT.resize(memorySizeKB);
 }
 
 size_t ABSearcher::getMemoryLimit() const
