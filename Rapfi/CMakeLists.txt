@@ -151,6 +151,12 @@ option(ENABLE_LTO "Enable link time optimization" OFF)
 option(FORCE_ASSERTION "Enable force assertion for all build type" OFF)
 option(USE_ASAN "Enable address sanitizer" OFF)
 
+option(BUILD_ENGINE_LIBRARY
+    "Also build the engine as a static library (rapfi_engine) that an external \
+CMake project can link and drive through the C++ API directly. It omits main() \
+and the piskvork/Yixin stdin protocol; everything a search needs is in it. The \
+pbrain-rapfi executable is unaffected and still built." OFF)
+
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "No build type selected, default to Release" FORCE)
 endif()
@@ -158,12 +164,15 @@ endif()
 #==========================================================
 # Rapfi Compiling
 
+# The engine proper: everything a search needs, and nothing that reads stdin or
+# owns the process. It is what BUILD_ENGINE_LIBRARY compiles into a library an
+# external project can link; the executable adds PROTOCOL_SOURCES and
+# MAIN_SOURCES back to it and is exactly the file set it always was.
 set(CORE_SOURCES
     command/argutils.cpp
     command/benchmark.cpp
     command/command.cpp
     command/dbcommand.cpp
-    command/gomocup.cpp
 
     core/compressor.cpp
     core/hash.cpp
@@ -206,6 +215,18 @@ set(CORE_SOURCES
 
     config.cpp
     internalConfig.cpp
+)
+
+# The piskvork/Yixin protocol loop. The whole stdin surface of the engine lives
+# in this one file, in namespace Command::GomocupProtocol, and nothing outside it
+# refers to that namespace — so leaving it out is what makes the library free of
+# a protocol it would never be driven through.
+set(PROTOCOL_SOURCES
+    command/gomocup.cpp
+)
+
+# The process entry point.
+set(MAIN_SOURCES
     main.cpp
 )
 
@@ -327,9 +348,30 @@ set(HEADERS
 
 add_executable(rapfi
     ${CORE_SOURCES}
+    ${PROTOCOL_SOURCES}
+    ${MAIN_SOURCES}
     $<$<NOT:$<BOOL:${NO_COMMAND_MODULES}>>:${MODULE_SOURCES}>
     ${HEADERS})
 set_target_properties(rapfi PROPERTIES OUTPUT_NAME "pbrain-rapfi")
+
+# Every target this project builds, so that the compile definitions below reach
+# all of them from one place instead of being maintained twice.
+set(RAPFI_TARGETS rapfi)
+
+# The embeddable engine: the same sources as the executable, without main() and
+# without the stdin protocol. Command modules are excluded from it too — they are
+# offline tooling (tuning, self-play, data preparation, the database commands)
+# that an embedding never calls, and they are what pulls in the flat.hpp, zip,
+# libnpy and thread-pool externals.
+if(BUILD_ENGINE_LIBRARY)
+    add_library(rapfi_engine STATIC ${CORE_SOURCES} ${HEADERS})
+    add_library(Rapfi::engine ALIAS rapfi_engine)
+    target_include_directories(rapfi_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+    set_target_properties(rapfi_engine PROPERTIES
+        OUTPUT_NAME "rapfi_engine"
+        POSITION_INDEPENDENT_CODE ON)
+    list(APPEND RAPFI_TARGETS rapfi_engine)
+endif()
 
 # external libraries
 add_subdirectory(external/cpptoml)
@@ -337,6 +379,13 @@ add_subdirectory(external/cxxopts)
 add_subdirectory(external/lz4)
 add_subdirectory(external/simde)
 target_link_libraries(rapfi PRIVATE cpptoml cxxopts lz4 simde)
+if(BUILD_ENGINE_LIBRARY)
+    # PUBLIC rather than PRIVATE: these are static libraries, so whatever links
+    # rapfi_engine has to link them too. cxxopts is not among them — every
+    # #include of it in this tree is inside a COMMAND_MODULES guard, which the
+    # library does not define.
+    target_link_libraries(rapfi_engine PUBLIC cpptoml lz4 simde)
+endif()
 if(NOT NO_COMMAND_MODULES)
     add_subdirectory(external/flat.hpp)
     add_subdirectory(external/zip)
@@ -454,48 +503,56 @@ endif()
 #==========================================================
 # Compile flags
 
-if(NOT NO_MULTI_THREADING)
-    target_compile_definitions(rapfi PRIVATE MULTI_THREADING)
-endif()
-if(NOT NO_COMMAND_MODULES)
-    target_compile_definitions(rapfi PRIVATE COMMAND_MODULES)
-endif()
-if(ENABLE_POLICY_TRAINING)
-    if(NO_COMMAND_MODULES)
-        message(FATAL_ERROR "ENABLE_POLICY_TRAINING requires command modules.")
+# Applied to every target in RAPFI_TARGETS, so the executable and the library are
+# compiled with one set of switches rather than two that can drift apart. The
+# switches that are not shared are COMMAND_MODULES and POLICY_TRAINING: the library
+# leaves the module sources out, so it must not be told they are there.
+foreach(RAPFI_TARGET IN LISTS RAPFI_TARGETS)
+    if(NOT NO_MULTI_THREADING)
+        target_compile_definitions(${RAPFI_TARGET} PRIVATE MULTI_THREADING)
     endif()
-    target_compile_definitions(rapfi PRIVATE POLICY_TRAINING)
-endif()
-if(NO_PREFETCH)
-    target_compile_definitions(rapfi PRIVATE NO_PREFETCH)
-endif()
-if(USE_SSE)
-    target_compile_definitions(rapfi PRIVATE USE_SSE)
-endif()
-if(USE_AVX2)
-    target_compile_definitions(rapfi PRIVATE USE_AVX2)
-endif()
-if(USE_AVX512)
-    target_compile_definitions(rapfi PRIVATE USE_AVX512)
-endif()
-if(USE_BMI2 OR USE_AVX512)
-    target_compile_definitions(rapfi PRIVATE USE_BMI2)
-endif()
-if(USE_VNNI)
-	target_compile_definitions(rapfi PRIVATE USE_VNNI)
-endif()
-if(USE_NEON OR USE_NEON_DOTPROD)
-    target_compile_definitions(rapfi PRIVATE USE_NEON)
-endif()
-if(USE_NEON_DOTPROD)
-	target_compile_definitions(rapfi PRIVATE USE_NEON_DOTPROD)
-endif()
+    if(NOT NO_COMMAND_MODULES AND NOT RAPFI_TARGET STREQUAL "rapfi_engine")
+        target_compile_definitions(${RAPFI_TARGET} PRIVATE COMMAND_MODULES)
+    endif()
+    if(ENABLE_POLICY_TRAINING AND NOT RAPFI_TARGET STREQUAL "rapfi_engine")
+        if(NO_COMMAND_MODULES)
+            message(FATAL_ERROR "ENABLE_POLICY_TRAINING requires command modules.")
+        endif()
+        target_compile_definitions(${RAPFI_TARGET} PRIVATE POLICY_TRAINING)
+    endif()
+    if(NO_PREFETCH)
+        target_compile_definitions(${RAPFI_TARGET} PRIVATE NO_PREFETCH)
+    endif()
+    if(USE_SSE)
+        target_compile_definitions(${RAPFI_TARGET} PRIVATE USE_SSE)
+    endif()
+    if(USE_AVX2)
+        target_compile_definitions(${RAPFI_TARGET} PRIVATE USE_AVX2)
+    endif()
+    if(USE_AVX512)
+        target_compile_definitions(${RAPFI_TARGET} PRIVATE USE_AVX512)
+    endif()
+    if(USE_BMI2 OR USE_AVX512)
+        target_compile_definitions(${RAPFI_TARGET} PRIVATE USE_BMI2)
+    endif()
+    if(USE_VNNI)
+        target_compile_definitions(${RAPFI_TARGET} PRIVATE USE_VNNI)
+    endif()
+    if(USE_NEON OR USE_NEON_DOTPROD)
+        target_compile_definitions(${RAPFI_TARGET} PRIVATE USE_NEON)
+    endif()
+    if(USE_NEON_DOTPROD)
+        target_compile_definitions(${RAPFI_TARGET} PRIVATE USE_NEON_DOTPROD)
+    endif()
+endforeach()
 
 if(ENABLE_LTO)
     include(CheckIPOSupported)
     check_ipo_supported(RESULT IPOSupported OUTPUT error)
     if(IPOSupported)
-        set_property(TARGET rapfi PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+        foreach(RAPFI_TARGET IN LISTS RAPFI_TARGETS)
+            set_property(TARGET ${RAPFI_TARGET} PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+        endforeach()
     else()
         message(STATUS "LTO not supported: <${error}>")
     endif()
