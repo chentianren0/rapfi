@@ -55,7 +55,11 @@ public:
 
     /// Set the memory size limit of the search.
     /// @param memorySizeKB Maximum memory size in KiB. Should be greater than zero.
-    virtual void setMemoryLimit(size_t memorySizeKB) = 0;
+    /// @return False if the transposition table could not be allocated at all;
+    ///     an embedding should then report the failure rather than search. True
+    ///     otherwise, including when the table degraded to a smaller size than
+    ///     asked for — getMemoryLimit() reports what was actually taken.
+    virtual bool setMemoryLimit(size_t memorySizeKB) = 0;
     /// Get the current memory size limit of the search.
     /// @return Maximum memory size in KiB.
     virtual size_t getMemoryLimit() const = 0;
