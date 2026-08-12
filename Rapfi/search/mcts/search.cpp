@@ -953,7 +953,7 @@ MCTSSearcher::MCTSSearcher() : Searcher(false)
     nodeTable           = std::make_unique<NodeTable>(SearchCfg.numNodeTableShardsPowerOfTwo);
 }
 
-void MCTSSearcher::setMemoryLimit(size_t memorySizeKB)
+bool MCTSSearcher::setMemoryLimit(size_t memorySizeKB)
 {
     // The argument is the total MCTS search-memory budget: a small capped
     // slice goes to the (shared) VCF TT, the rest becomes the graph budget.
@@ -977,7 +977,7 @@ void MCTSSearcher::setMemoryLimit(size_t memorySizeKB)
                                ? graphKB * 1024
                                : std::numeric_limits<size_t>::max();
     }
-    TT.resize(vcfTTSizeKB);
+    return TT.resize(vcfTTSizeKB);
 }
 
 size_t MCTSSearcher::getMemoryLimit() const

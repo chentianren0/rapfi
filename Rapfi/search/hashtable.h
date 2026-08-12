@@ -43,7 +43,17 @@ public:
     /// If size changed, all hash entries will be cleared after resizing the table.
     /// When memory allocation failed, it will try to find the max available hash
     /// size by reducing cluster count to half recursively.
-    void resize(size_t hashSizeKB);
+    /// @return True unless not even one bucket could be allocated, in which case
+    ///     the table is left on an internal scratch bucket — usable, so that no
+    ///     unguarded probe or store faults, but holding nothing. An embedding is
+    ///     expected to treat false as a failure to prepare and not to search.
+    bool resize(size_t hashSizeKB);
+    /// Whether the table currently holds memory of its own. False only after a
+    /// resize() that could not allocate a single bucket, which is how an
+    /// embedding observes an allocation failure reported through a path with no
+    /// error channel of its own — a config commit, for instance, which applies
+    /// the configured size and returns nothing.
+    bool allocated() const { return ownsTable; }
     /// Clear all hash entries. If multi-threading is enabled, clearing will be
     /// performed in parallel with number of threads equals to `Engine.size()`.
     void clear();
@@ -86,9 +96,14 @@ private:
     TTBucket *table;
     size_t    numBuckets;
     uint8_t   generation;
+    /// Whether `table` is memory this object allocated and must free. False
+    /// while the table sits on the scratch bucket resize() falls back to.
+    bool ownsTable;
 
     /// Get address of the first entry for a hash key.
     TTEntry *firstEntry(HashKey key) const;
+    /// Free `table` if it is owned, and leave the pointer null either way.
+    void releaseTable();
 };
 
 extern HashTable TT;

@@ -80,33 +80,56 @@ struct TTBucket
 // Make sure the size of TTBucket can be fitted into one cache line
 static_assert(CACHE_LINE_SIZE % sizeof(TTBucket) == 0, "TTBucket not fitted into cache line");
 
+/// The bucket the table points at when not one bucket could be allocated for it.
+///
+/// It exists so that total allocation failure has somewhere to land other than
+/// std::exit(): probe(), store(), prefetch() and hashUsage() are all unguarded
+/// and rest on the `numBuckets >= 1` class invariant, and this keeps that
+/// invariant true in a state that used to be unreachable because the process
+/// left instead. Nothing is ever read out of it as a real result — an entry is
+/// accepted only when its stored 32-bit key check matches the probed key, which
+/// zeroed or concurrently overwritten scratch data effectively never does — and
+/// resize() reports the failure to its caller, which is expected to stop rather
+/// than search on.
+alignas(CACHE_LINE_SIZE) static TTBucket ScratchBucket {};
+
 /// Global shared transposition table
 HashTable TT {16 * 1024};  // default size is 16 MB
 
-HashTable::HashTable(size_t hashSizeKB) : table(nullptr), numBuckets(0)
+HashTable::HashTable(size_t hashSizeKB) : table(nullptr), numBuckets(0), ownsTable(false)
 {
     resize(hashSizeKB);
 }
 
 HashTable::~HashTable()
 {
-    MemAlloc::alignedLargePageFree(table);
+    releaseTable();
 }
 
-void HashTable::resize(size_t hashSizeKB)
+void HashTable::releaseTable()
+{
+    // ScratchBucket has static storage duration and must never be freed.
+    if (table && ownsTable)
+        MemAlloc::alignedLargePageFree(table);
+    table     = nullptr;
+    ownsTable = false;
+}
+
+bool HashTable::resize(size_t hashSizeKB)
 {
     size_t newNumBuckets = hashSizeKB * (1024 / sizeof(TTBucket));
     newNumBuckets        = std::max<size_t>(newNumBuckets, 1);
 
-    if (newNumBuckets == numBuckets)
-        return;
+    // ownsTable is part of the test so that a table sitting on ScratchBucket is
+    // always retried, even when the request happens to round to one bucket.
+    if (newNumBuckets == numBuckets && ownsTable)
+        return true;
 
     numBuckets = newNumBuckets;
 
     if (table) {
         Engine.waitForIdle();
-        MemAlloc::alignedLargePageFree(table);
-        table = nullptr;
+        releaseTable();
     }
 
     size_t tryNumBuckets = numBuckets;
@@ -119,20 +142,32 @@ void HashTable::resize(size_t hashSizeKB)
         else
             break;
     }
+    ownsTable = table != nullptr;
 
     if (tryNumBuckets != numBuckets) {
         numBuckets = tryNumBuckets;
         ERRORL("Failed to allocate " << hashSizeKB << " KB for transposition table.");
 
-        // Exit program if failed to allocate 1 cluster
-        if (!numBuckets)
-            std::exit(EXIT_FAILURE);
+        // Not even one bucket could be allocated. Report the failure instead of
+        // terminating: this engine is embedded as a library, and a library that
+        // calls std::exit() takes its host process down with it, giving the
+        // caller nothing to observe and no chance to recover. The table is left
+        // on ScratchBucket so that a caller which ignores the failure meets a
+        // usable-but-useless table rather than a null one.
+        if (!numBuckets) {
+            table      = &ScratchBucket;
+            numBuckets = 1;
+            ownsTable  = false;
+            clear();
+            return false;
+        }
 
         MESSAGEL("Allocated " << (numBuckets * sizeof(TTBucket) >> 10)
                               << " KB for transposition table.");
     }
 
     clear();
+    return true;
 }
 
 void HashTable::clear()
@@ -312,22 +347,22 @@ bool HashTable::load(std::istream &inStream)
     numBuckets = newNumBuckets;
     generation = newGeneration;
 
-    if (table)
-        MemAlloc::alignedLargePageFree(table);
+    releaseTable();
     size_t allocSize = sizeof(TTBucket) * numBuckets;
     table            = static_cast<TTBucket *>(MemAlloc::alignedLargePageAlloc(allocSize));
     if (!table) {
         // Allocation failure must not leave the TT unusable (probe/store/
         // prefetch and hashUsage all assume a valid table). Fall back to a
         // fresh table via resize(), which follows the established degradation
-        // policy (halve until an allocation succeeds, exit if even one bucket
-        // is impossible).
+        // policy (halve until an allocation succeeds, and settle on the scratch
+        // bucket if even one bucket is impossible).
         ERRORL("Failed to allocate " << (allocSize >> 10) << " KB for loading hash table.");
         size_t targetSizeKB = std::max<size_t>(allocSize >> 10, 1);
         numBuckets          = 0;  // force resize() to reallocate
         resize(targetSizeKB);
         return false;
     }
+    ownsTable = true;
 
     for (size_t i = 0; i < numBuckets; i++) {
         TTBucket &cluster = table[i];
